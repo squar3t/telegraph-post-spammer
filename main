@@ -1,0 +1,613 @@
+import requests
+import json
+import argparse
+import sys
+import time
+from typing import Dict, Any, Optional
+import re
+
+
+class TelegraphClient:
+    def __init__(self):
+        self.base_url = "https://api.telegra.ph"
+        self.access_token = None
+        self.account_info = None
+
+    def create_account(self, short_name: str, author_name: str = "", author_url: str = "") -> Dict[str, Any]:
+        url = f"{self.base_url}/createAccount"
+        data = {
+            "short_name": short_name,
+            "author_name": author_name,
+            "author_url": author_url
+        }
+
+        response = requests.post(url, data=data)
+        result = response.json()
+
+        if result.get("ok"):
+            self.access_token = result["result"]["access_token"]
+            self.account_info = result["result"]
+            return result["result"]
+        else:
+            raise Exception(f"Ошибка создания аккаунта: {result.get('error', 'Неизвестная ошибка')}")
+
+    def create_page(self, title: str, content: str, author_name: str = "",
+                    author_url: str = "", return_content: bool = False) -> Dict[str, Any]:
+        if not self.access_token:
+            raise Exception("Необходимо создать аккаунт или установить access_token")
+
+        url = f"{self.base_url}/createPage"
+
+        content_nodes = self._text_to_nodes(content)
+
+        data = {
+            "access_token": self.access_token,
+            "title": title,
+            "content": json.dumps(content_nodes),
+            "return_content": return_content
+        }
+
+        if author_name:
+            data["author_name"] = author_name
+        if author_url:
+            data["author_url"] = author_url
+
+        response = requests.post(url, data=data)
+        result = response.json()
+
+        if result.get("ok"):
+            return result["result"]
+        else:
+            raise Exception(f"Ошибка создания статьи: {result.get('error', 'Неизвестная ошибка')}")
+
+    def _text_to_nodes(self, text: str) -> list:
+        nodes = []
+        paragraphs = text.split('\n\n')
+
+        for paragraph in paragraphs:
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+
+            if paragraph.startswith('# '):
+                nodes.append({
+                    "tag": "h3",
+                    "children": [paragraph[2:]]
+                })
+            elif paragraph.startswith('## '):
+                nodes.append({
+                    "tag": "h4",
+                    "children": [paragraph[3:]]
+                })
+            else:
+                # Обычный абзац
+                nodes.append({
+                    "tag": "p",
+                    "children": [paragraph]
+                })
+
+        return nodes
+
+    def get_account_info(self) -> Dict[str, Any]:
+        if not self.access_token:
+            raise Exception("Необходимо создать аккаунт или установить access_token")
+
+        url = f"{self.base_url}/getAccountInfo"
+        params = {"access_token": self.access_token}
+
+        response = requests.get(url, params=params)
+        result = response.json()
+
+        if result.get("ok"):
+            return result["result"]
+        else:
+            raise Exception(f"Ошибка получения информации: {result.get('error', 'Неизвестная ошибка')}")
+
+
+def load_config() -> Dict[str, Any]:
+    try:
+        with open('telegraph_config.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_config(config: Dict[str, Any]):
+    with open('telegraph_config.json', 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def interactive_mode():
+    """Интерактивный режим работы"""
+    print("=== Telegraph Article Creator ===")
+    print("Интерактивный режим создания статей\n")
+
+    client = TelegraphClient()
+    config = load_config()
+
+    try:
+        if config.get('access_token'):
+            client.access_token = config['access_token']
+            print(f"Используется сохраненный аккаунт: {config.get('short_name', 'Неизвестно')}")
+            try:
+                account_info = client.get_account_info()
+                print(f"Автор: {account_info.get('author_name', 'Не указан')}")
+            except Exception as e:
+                print(f"Ошибка получения информации об аккаунте: {e}")
+                config = {}
+        else:
+            print("Создание нового аккаунта Telegraph:")
+            short_name = input("Короткое имя аккаунта (обязательно): ")
+            if not short_name:
+                print("Короткое имя аккаунта обязательно!")
+                return
+
+            author_name = input("Имя автора (необязательно): ")
+            author_url = input("URL автора (необязательно): ")
+
+            try:
+                account = client.create_account(short_name, author_name, author_url)
+                print(f"Аккаунт создан успешно!")
+                print(f"Access Token: {account['access_token']}")
+
+                config = {
+                    'access_token': account['access_token'],
+                    'short_name': short_name,
+                    'author_name': author_name,
+                    'author_url': author_url
+                }
+                save_config(config)
+                print("Конфигурация сохранена в telegraph_config.json")
+
+            except Exception as e:
+                print(f"Ошибка создания аккаунта: {e}")
+                return
+
+        print("\n" + "=" * 50)
+
+        while True:
+            try:
+                print("\nВыберите действие:")
+                print("1. Создать одну статью")
+                print("2. Создать несколько статей с одним содержанием")
+                print("3. Информация об аккаунте")
+                print("4. Выход")
+
+                choice = input("\nВаш выбор (1-4): ")
+
+                if choice == '1':
+                    create_article_interactive(client)
+                elif choice == '2':
+                    create_multiple_articles_interactive(client)
+                elif choice == '3':
+                    show_account_info(client)
+                elif choice == '4':
+                    print("До свидания!")
+                    break
+                else:
+                    print("Неверный выбор. Попробуйте еще раз.")
+
+            except (EOFError, KeyboardInterrupt):
+                print("\n\nВыход из программы...")
+                break
+            except Exception as e:
+                print(f"Произошла ошибка: {e}")
+                continue
+
+    except (EOFError, KeyboardInterrupt):
+        print("\n\nВыход из программы...")
+    except Exception as e:
+        print(f"Критическая ошибка: {e}")
+
+
+def create_multiple_articles_interactive(client: TelegraphClient):
+    print("\n=== Создание нескольких статей ===")
+
+    try:
+        # Получаем содержание статьи один раз
+        print("Сначала введите содержание для всех статей:")
+        print("\nВыберите способ ввода содержания:")
+        print("1. Ввести текст построчно (введите 'END' для завершения)")
+        print("2. Загрузить из файла")
+
+        choice = input("Ваш выбор (1-2): ")
+
+        content = ""
+
+        if choice == '1':
+            print("\nВведите содержание статьи:")
+            print("Поддерживаются заголовки: # Заголовок 1, ## Заголовок 2")
+            print("Абзацы разделяются двумя переносами строк")
+            print("Для завершения ввода введите 'END' на отдельной строке\n")
+
+            content_lines = []
+            while True:
+                try:
+                    line = input()
+                    if line.strip().upper() == 'END':
+                        break
+                    content_lines.append(line)
+                except (EOFError, KeyboardInterrupt):
+                    break
+
+            content = '\n'.join(content_lines)
+
+        elif choice == '2':
+            filename = input("Имя файла: ")
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                print(f"Содержание загружено из файла: {filename}")
+            except FileNotFoundError:
+                print(f"Файл {filename} не найден!")
+                return
+            except Exception as e:
+                print(f"Ошибка чтения файла: {e}")
+                return
+        else:
+            print("Неверный выбор!")
+            return
+
+        if not content.strip():
+            print("Содержание не может быть пустым!")
+            return
+
+        while True:
+            try:
+                count = int(input("\nСколько статей создать? "))
+                if count <= 0:
+                    print("Количество должно быть больше 0!")
+                    continue
+                break
+            except ValueError:
+                print("Введите корректное число!")
+                continue
+
+        print(f"\nВыберите способ создания заголовков для {count} статей:")
+        print("1. Ввести заголовки вручную")
+        print("2. Использовать базовый заголовок с нумерацией")
+        print("3. Загрузить заголовки из файла")
+
+        title_choice = input("Ваш выбор (1-3): ")
+
+        titles = []
+
+        if title_choice == '1':
+            print(f"\nВведите {count} заголовков:")
+            for i in range(count):
+                title = input(f"Заголовок {i + 1}: ")
+                if not title.strip():
+                    title = f"Статья {i + 1}"
+                titles.append(title)
+
+        elif title_choice == '2':
+            base_title = input("Базовый заголовок: ")
+            if not base_title.strip():
+                base_title = "Статья"
+
+            for i in range(count):
+                titles.append(f"{base_title}")
+
+        elif title_choice == '3':
+            titles_file = input("Имя файла с заголовками (по одному на строку): ")
+            try:
+                with open(titles_file, 'r', encoding='utf-8') as f:
+                    file_titles = [line.strip() for line in f.readlines() if line.strip()]
+
+                if len(file_titles) < count:
+                    print(f"В файле только {len(file_titles)} заголовков, а нужно {count}!")
+                    for i in range(len(file_titles), count):
+                        file_titles.append(f"Статья {i + 1}")
+
+                titles = file_titles[:count]
+                print(f"Загружено {len(titles)} заголовков")
+
+            except FileNotFoundError:
+                print(f"Файл {titles_file} не найден!")
+                return
+            except Exception as e:
+                print(f"Ошибка чтения файла: {e}")
+                return
+        else:
+            print("Неверный выбор!")
+            return
+
+        print("\nИнформация об авторе (будет использована для всех статей):")
+        author_name = input("Имя автора (необязательно): ")
+        author_url = input("URL автора (необязательно): ")
+
+        print(f"\nСоздание {count} статей...")
+        print("=" * 50)
+
+        created_articles = []
+        failed_articles = []
+
+        for i, title in enumerate(titles, 1):
+            try:
+                print(f"Создание статьи {i}/{count}: {title}")
+                result = client.create_page(title, content, author_name, author_url)
+                created_articles.append({
+                    'title': title,
+                    'url': result['url'],
+                    'path': result['path']
+                })
+                print(f"✓ Успешно создана: {result['url']}")
+
+            except Exception as e:
+                failed_articles.append({
+                    'title': title,
+                    'error': str(e)
+                })
+                print(f"✗ Ошибка создания статьи '{title}': {e}")
+
+            import time
+            time.sleep(0.5)
+
+        print("\n" + "=" * 50)
+        print("РЕЗУЛЬТАТЫ:")
+        print(f"Успешно создано: {len(created_articles)}")
+        print(f"Ошибок: {len(failed_articles)}")
+
+        if created_articles:
+            print("\nСозданные статьи:")
+            for article in created_articles:
+                print(f"• {article['title']}")
+                print(f"  URL: {article['url']}")
+                print()
+
+        if failed_articles:
+            print("\nОшибки при создании:")
+            for article in failed_articles:
+                print(f"• {article['title']}: {article['error']}")
+
+        if created_articles:
+            save_articles_list(created_articles)
+            print("Список созданных статей сохранен в articles_list.json")
+
+    except (EOFError, KeyboardInterrupt):
+        print("\n\nОперация отменена пользователем.")
+        return
+    except Exception as e:
+        print(f"Ошибка: {e}")
+
+
+def save_articles_list(articles):
+    try:
+        try:
+            with open('articles_list.json', 'r', encoding='utf-8') as f:
+                all_articles = json.load(f)
+        except FileNotFoundError:
+            all_articles = []
+
+        import datetime
+        timestamp = datetime.datetime.now().isoformat()
+
+        batch = {
+            'timestamp': timestamp,
+            'articles': articles
+        }
+
+        all_articles.append(batch)
+
+        with open('articles_list.json', 'w', encoding='utf-8') as f:
+            json.dump(all_articles, f, ensure_ascii=False, indent=2)
+
+    except Exception as e:
+        print(f"Ошибка сохранения списка статей: {e}")
+
+
+def create_article_interactive(client: TelegraphClient):
+    print("\n=== Создание новой статьи ===")
+
+    try:
+        title = input("Заголовок статьи: ")
+        if not title:
+            print("Заголовок обязателен!")
+            return
+
+        print("\nВыберите способ ввода содержания:")
+        print("1. Ввести текст построчно (введите 'END' для завершения)")
+        print("2. Загрузить из файла")
+
+        choice = input("Ваш выбор (1-2): ")
+
+        content = ""
+
+        if choice == '1':
+            print("\nВведите содержание статьи:")
+            print("Поддерживаются заголовки: # Заголовок 1, ## Заголовок 2")
+            print("Абзацы разделяются двумя переносами строк")
+            print("Для завершения ввода введите 'END' на отдельной строке\n")
+
+            content_lines = []
+            while True:
+                try:
+                    line = input()
+                    if line.strip().upper() == 'END':
+                        break
+                    content_lines.append(line)
+                except (EOFError, KeyboardInterrupt):
+                    break
+
+            content = '\n'.join(content_lines)
+
+        elif choice == '2':
+            filename = input("Имя файла: ")
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                print(f"Содержание загружено из файла: {filename}")
+            except FileNotFoundError:
+                print(f"Файл {filename} не найден!")
+                return
+            except Exception as e:
+                print(f"Ошибка чтения файла: {e}")
+                return
+        else:
+            print("Неверный выбор!")
+            return
+
+        if not content.strip():
+            print("Содержание не может быть пустым!")
+            return
+
+        author_name = input("\nИмя автора (необязательно): ")
+        author_url = input("URL автора (необязательно): ")
+
+        print("\nСоздание статьи...")
+        result = client.create_page(title, content, author_name, author_url)
+        print(f"\nСтатья создана успешно!")
+        print(f"URL: {result['url']}")
+        print(f"Заголовок: {result['title']}")
+        print(f"Путь: {result['path']}")
+
+    except (EOFError, KeyboardInterrupt):
+        print("\n\nОперация отменена пользователем.")
+        return
+    except Exception as e:
+        print(f"Ошибка создания статьи: {e}")
+
+
+def show_account_info(client: TelegraphClient):
+    try:
+        info = client.get_account_info()
+        print(f"\n=== Информация об аккаунте ===")
+        print(f"Короткое имя: {info.get('short_name', 'Не указано')}")
+        print(f"Имя автора: {info.get('author_name', 'Не указано')}")
+        print(f"URL автора: {info.get('author_url', 'Не указано')}")
+        print(f"Количество статей: {info.get('page_count', 0)}")
+    except Exception as e:
+        print(f"Ошибка получения информации: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Telegraph Article Creator')
+    parser.add_argument('--title', help='Заголовок статьи')
+    parser.add_argument('--content', help='Содержание статьи')
+    parser.add_argument('--file', help='Файл с содержанием статьи')
+    parser.add_argument('--author-name', help='Имя автора')
+    parser.add_argument('--author-url', help='URL автора')
+    parser.add_argument('--interactive', action='store_true', help='Интерактивный режим')
+
+    parser.add_argument('--multiple', action='store_true', help='Создать несколько статей')
+    parser.add_argument('--count', type=int, help='Количество статей для создания')
+    parser.add_argument('--titles-file', help='Файл с заголовками (по одному на строку)')
+    parser.add_argument('--base-title', help='Базовый заголовок для нумерации')
+
+    args = parser.parse_args()
+
+    if args.interactive or len(sys.argv) == 1:
+        interactive_mode()
+        return
+
+    client = TelegraphClient()
+    config = load_config()
+
+    if not config.get('access_token'):
+        print("Ошибка: Не найден сохраненный аккаунт. Запустите в интерактивном режиме для создания аккаунта.")
+        return
+
+    client.access_token = config['access_token']
+
+    if args.file:
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except FileNotFoundError:
+            print(f"Ошибка: Файл {args.file} не найден!")
+            return
+    elif args.content:
+        content = args.content
+    else:
+        print("Ошибка: Необходимо указать содержание или файл!")
+        return
+
+    if args.multiple:
+        if not args.count:
+            print("Ошибка: Для создания нескольких статей укажите --count")
+            return
+
+        titles = []
+
+        if args.titles_file:
+            try:
+                with open(args.titles_file, 'r', encoding='utf-8') as f:
+                    file_titles = [line.strip() for line in f.readlines() if line.strip()]
+
+                if len(file_titles) < args.count:
+                    print(f"В файле только {len(file_titles)} заголовков, а нужно {args.count}!")
+                    return
+
+                titles = file_titles[:args.count]
+            except FileNotFoundError:
+                print(f"Ошибка: Файл {args.titles_file} не найден!")
+                return
+
+        elif args.base_title:
+            for i in range(args.count):
+                titles.append(f"{args.base_title}")
+
+        elif args.title:
+            for i in range(args.count):
+                titles.append(f"{args.title}")
+
+        else:
+            print("Ошибка: Для создания нескольких статей укажите --titles-file, --base-title или --title")
+            return
+
+        print(f"Создание {args.count} статей...")
+        created_articles = []
+        failed_articles = []
+
+        for i, title in enumerate(titles, 1):
+            try:
+                print(f"Создание статьи {i}/{args.count}: {title}")
+                result = client.create_page(
+                    title,
+                    content,
+                    args.author_name or config.get('author_name', ''),
+                    args.author_url or config.get('author_url', '')
+                )
+                created_articles.append({
+                    'title': title,
+                    'url': result['url'],
+                    'path': result['path']
+                })
+                print(f"✓ Успешно создана: {result['url']}")
+
+            except Exception as e:
+                failed_articles.append({
+                    'title': title,
+                    'error': str(e)
+                })
+                print(f"✗ Ошибка: {e}")
+
+            import time
+            time.sleep(0.5)
+
+        print(f"\nРезультаты: создано {len(created_articles)}, ошибок {len(failed_articles)}")
+
+        if created_articles:
+            save_articles_list(created_articles)
+            print("Список статей сохранен в articles_list.json")
+
+    else:
+        if not args.title:
+            print("Ошибка: Заголовок обязателен!")
+            return
+
+        try:
+            result = client.create_page(
+                args.title,
+                content,
+                args.author_name or config.get('author_name', ''),
+                args.author_url or config.get('author_url', '')
+            )
+            print(f"Статья создана успешно!")
+            print(f"URL: {result['url']}")
+        except Exception as e:
+            print(f"Ошибка создания статьи: {e}")
+
+
+if __name__ == "__main__":
+    main()
